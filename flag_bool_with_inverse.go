@@ -32,13 +32,14 @@ type BoolWithInverseFlag struct {
 	InversePrefix    string                                      `json:"invPrefix"`        // The prefix used to indicate a negative value. Default: `env` becomes `no-env`
 
 	// unexported fields for internal use
-	count      int   // number of times the flag has been set
-	hasBeenSet bool  // whether the flag has been set from env or file
-	applied    bool  // whether the flag has been applied to a flag set already
-	value      Value // value representing this flag's value
-	pset       bool
-	nset       bool
-	stringer   FlagStringFunc // optional per-flag override of FlagStringer
+	count       int   // number of times the flag has been set
+	hasBeenSet  bool  // whether the flag has been set from env or file
+	applied     bool  // whether the flag has been applied to a flag set already
+	value       Value // value representing this flag's value
+	pset        bool
+	nset        bool
+	stringer    FlagStringFunc   // optional per-flag override of FlagStringer
+	valueOrigin *FlagValueSource // winning origin of the final merged value
 }
 
 // SetStringer overrides the [FlagStringFunc] used by this flag's String
@@ -57,6 +58,35 @@ func (bif *BoolWithInverseFlag) SetStringer(s FlagStringFunc) {
 
 func (bif *BoolWithInverseFlag) IsSet() bool {
 	return bif.hasBeenSet
+}
+
+// RecordCLISource marks the flag value as originating from the command
+// line (including the --no-<name> inverse spelling).
+func (bif *BoolWithInverseFlag) RecordCLISource(name string) {
+	if name == "" {
+		name = bif.Name
+	}
+	bif.valueOrigin = &FlagValueSource{
+		Layer:    LayerCommandLine,
+		Source:   &cliValueSource{flagName: name},
+		FlagName: bif.Name,
+	}
+}
+
+// ValueSourceOrigin reports the winning merge layer and concrete source
+// for this flag's final value. It satisfies [SourceTracker].
+func (bif *BoolWithInverseFlag) ValueSourceOrigin() (FlagValueSource, bool) {
+	if !bif.applied {
+		return FlagValueSource{}, false
+	}
+	if bif.valueOrigin != nil {
+		return *bif.valueOrigin, true
+	}
+	return FlagValueSource{
+		Layer:    LayerDefault,
+		Source:   &defaultCodeSource{flagName: bif.Name},
+		FlagName: bif.Name,
+	}, true
 }
 
 func (bif *BoolWithInverseFlag) Get() any {
@@ -84,6 +114,9 @@ func (bif *BoolWithInverseFlag) inversePrefix() string {
 }
 
 func (bif *BoolWithInverseFlag) PreParse() error {
+	if err := bif.Sources.ValidateSourceOrder(); err != nil {
+		return fmt.Errorf("cannot install flag %[1]s: %[2]w", bif.Name, err)
+	}
 	dest := bif.Destination
 	if dest == nil {
 		dest = new(bool)
@@ -120,6 +153,11 @@ func (bif *BoolWithInverseFlag) PostParse() error {
 			}
 
 			bif.hasBeenSet = true
+			bif.valueOrigin = &FlagValueSource{
+				Layer:    sourceLayer(source),
+				Source:   source,
+				FlagName: bif.Name,
+			}
 		}
 	}
 

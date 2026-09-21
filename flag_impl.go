@@ -76,12 +76,13 @@ type FlagBase[T any, C any, VC ValueCreator[T, C]] struct {
 	ValidateDefaults bool                                     `json:"validateDefaults"` // whether to validate defaults or not
 
 	// unexported fields for internal use
-	count      int            // number of times the flag has been set
-	hasBeenSet bool           // whether the flag has been set from env or file
-	applied    bool           // whether the flag has been applied to a flag set already
-	creator    VC             // value creator for this flag type
-	value      Value          // value representing this flag's value
-	stringer   FlagStringFunc // optional per-flag override of FlagStringer
+	count       int              // number of times the flag has been set
+	hasBeenSet  bool             // whether the flag has been set from env or file
+	applied     bool             // whether the flag has been applied to a flag set already
+	creator     VC               // value creator for this flag type
+	value       Value            // value representing this flag's value
+	stringer    FlagStringFunc   // optional per-flag override of FlagStringer
+	valueOrigin *FlagValueSource // winning origin of the final merged value
 }
 
 // GetValue returns the flags value as string representation and an empty
@@ -153,6 +154,11 @@ func (f *FlagBase[T, C, V]) PostParse() error {
 			}
 
 			f.hasBeenSet = true
+			f.recordOrigin(&FlagValueSource{
+				Layer:    sourceLayer(source),
+				Source:   source,
+				FlagName: f.Name,
+			})
 		}
 	}
 
@@ -169,6 +175,10 @@ func (f *FlagBase[T, C, V]) setMultiValueParsingConfig(c multiValueParsingConfig
 
 func (f *FlagBase[T, C, V]) PreParse() error {
 	newVal := f.Value
+
+	if err := f.Sources.ValidateSourceOrder(); err != nil {
+		return fmt.Errorf("cannot install flag %[1]s: %[2]w", f.Name, err)
+	}
 
 	if f.Destination == nil {
 		f.value = f.creator.Create(newVal, new(T), f.Config)
@@ -384,4 +394,38 @@ func (f *FlagBase[T, C, VC]) IsBoolFlag() bool {
 // Count returns the number of times this flag has been invoked
 func (f *FlagBase[T, C, VC]) Count() int {
 	return f.count
+}
+
+func (f *FlagBase[T, C, V]) recordOrigin(origin *FlagValueSource) {
+	f.valueOrigin = origin
+}
+
+// RecordCLISource marks the flag value as originating from the command
+// line. Command line always wins over an already-resolved source, so an
+// existing origin is overwritten. It satisfies cliSourceRecorder.
+func (f *FlagBase[T, C, V]) RecordCLISource(name string) {
+	if name == "" {
+		name = f.Name
+	}
+	f.valueOrigin = &FlagValueSource{
+		Layer:    LayerCommandLine,
+		Source:   &cliValueSource{flagName: name},
+		FlagName: name,
+	}
+}
+
+// ValueSourceOrigin reports the winning merge layer and concrete source
+// for this flag's final value. It satisfies [SourceTracker].
+func (f *FlagBase[T, C, V]) ValueSourceOrigin() (FlagValueSource, bool) {
+	if !f.applied {
+		return FlagValueSource{}, false
+	}
+	if f.valueOrigin != nil {
+		return *f.valueOrigin, true
+	}
+	return FlagValueSource{
+		Layer:    LayerDefault,
+		Source:   &defaultCodeSource{flagName: f.Name},
+		FlagName: f.Name,
+	}, true
 }

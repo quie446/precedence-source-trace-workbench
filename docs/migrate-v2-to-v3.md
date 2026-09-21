@@ -275,6 +275,29 @@ Binary size in v3 is managed through architectural simplification rather than bu
 
 In the above case the Envs are checked first and if not found then files are looked at and then finally the `altsrc`
 
+#### Locked source precedence
+
+The declared source order is additionally checked against the locked
+precedence
+
+```
+command line > environment > file/config > code default
+```
+
+A `Sources` chain that places a lower-precedence source before a
+higher-precedence one (for example `cli.File(...)` before `cli.EnvVar(...)`)
+now returns an error at flag install time that names both offending layers.
+This does not change the result for chains already ordered environment first,
+then files/altsrc. If you previously relied on a file overriding an
+environment variable, reorder the chain to `cli.EnvVars(...)` followed by
+`cli.File(...)`/altsrc sources.
+
+To discover which layer supplied a flag's final value, use
+`cmd.ValueSource("flag-name")`, which returns a `cli.FlagValueSource`
+(`Layer` is one of `command-line`, `environment`, `file`, `default`) and a
+boolean. The boolean is false when the flag is unknown or the tracked origin
+cannot be reconciled with the actual merge result.
+
 ## cli.Context has been removed
 
 All functions handled previously by `cli.Context` have been incorporated into `cli.Command`:

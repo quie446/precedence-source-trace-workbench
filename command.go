@@ -158,6 +158,8 @@ type Command struct {
 	appliedFlags []Flag
 	// flags that have been set
 	setFlags map[Flag]struct{}
+	// flags provided directly on the command line
+	cliSetFlags map[Flag]struct{}
 	// The parent of this command. This value will be nil for the
 	// command at the root of the graph.
 	parent *Command
@@ -376,9 +378,16 @@ func (cmd *Command) Root() *Command {
 
 func (cmd *Command) set(fName string, f Flag, val string) error {
 	cmd.setFlags[f] = struct{}{}
+	if cmd.cliSetFlags == nil {
+		cmd.cliSetFlags = map[Flag]struct{}{}
+	}
+	cmd.cliSetFlags[f] = struct{}{}
 	cmd.setMultiValueParsingConfig(f)
 	if err := f.Set(fName, val); err != nil {
 		return fmt.Errorf("invalid value %q for flag -%s: %v", val, fName, err)
+	}
+	if rec, ok := f.(cliSourceRecorder); ok {
+		rec.RecordCLISource(fName)
 	}
 	return nil
 }
@@ -679,6 +688,57 @@ func (cmd *Command) Value(name string) any {
 
 	tracef("value NOT found for name %[1]q (cmd=%[2]q)", name, cmd.Name)
 	return nil
+}
+
+// ValueSource returns the layer and concrete source from which the flag
+// identified by name obtained its final merged value: command line,
+// environment, file/config source, or the code default.
+//
+// The returned origin is cross-checked against the actual merged state:
+// a claimed environment/file origin must correspond to a flag marked as
+// externally set, and a command line origin to a flag provided on the
+// command line. If the tracked origin cannot be reconciled with the
+// merge result, ok is false so callers cannot act on a fabricated
+// provenance.
+func (cmd *Command) ValueSource(name string) (FlagValueSource, bool) {
+	fl := cmd.lookupAppliedFlag(name)
+	if fl == nil {
+		return FlagValueSource{}, false
+	}
+
+	tracker, ok := fl.(SourceTracker)
+	if !ok {
+		return FlagValueSource{}, false
+	}
+
+	origin, ok := tracker.ValueSourceOrigin()
+	if !ok {
+		return FlagValueSource{}, false
+	}
+
+	_, fromCLI := cmd.cliSetFlags[fl]
+
+	switch origin.Layer {
+	case LayerCommandLine:
+		if !fromCLI {
+			tracef("value source mismatch for %[1]q: claims command line but was not provided (cmd=%[2]q)", name, cmd.Name)
+			return FlagValueSource{}, false
+		}
+	case LayerEnvironment, LayerFile:
+		if !fl.IsSet() {
+			tracef("value source mismatch for %[1]q: claims %[2]s but flag is unset (cmd=%[3]q)", name, origin.Layer, cmd.Name)
+			return FlagValueSource{}, false
+		}
+	case LayerDefault:
+		if fromCLI {
+			tracef("value source mismatch for %[1]q: claims default but was provided on command line (cmd=%[2]q)", name, cmd.Name)
+			return FlagValueSource{}, false
+		}
+	default:
+		return FlagValueSource{}, false
+	}
+
+	return origin, true
 }
 
 // Args returns the command line arguments associated with the

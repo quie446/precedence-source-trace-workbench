@@ -136,6 +136,41 @@ func main() {
 Note that default values are set in the same order as they are defined in the
 `Sources` param. This allows the user to choose order of priority
 
+#### Override precedence and source tracking
+
+Regardless of how sources are combined, the merge precedence for any flag is
+locked to:
+
+1. command line flags (highest)
+2. environment variable sources
+3. file / structured config sources
+4. the code `Value` default (lowest)
+
+The first source in a `Sources` chain must not be a lower-precedence layer
+than a source that follows it. A chain such as
+`NewValueSourceChain(File("cfg"), EnvVar("APP_X"))` puts a file ahead of an
+environment variable, which contradicts the locked precedence. Such a chain
+fails at flag install time with an error naming both offending layers,
+instead of producing an undefined merge. Chains that already follow
+environment-then-file order continue to merge exactly as before.
+
+After a command has run you can ask where a flag's final value came from via
+`Command.ValueSource`:
+
+```go
+origin, ok := cmd.ValueSource("name")
+if !ok {
+	// the flag does not exist or its tracked origin does not match the
+	// actual merge result
+}
+fmt.Println(origin.Layer)  // "command-line", "environment", "file", or "default"
+fmt.Println(origin)        // human readable, e.g. environment variable "APP_NAME"
+```
+
+`ValueSource` cross-checks the tracked origin against the real merge result:
+if the reported layer cannot be reconciled with how the value was actually
+resolved, it returns `ok == false` rather than reporting a fabricated source.
+
 #### Values from alternate input sources (YAML, TOML, and others)
 
 There is a separate package [altsrc](https://github.com/urfave/cli-altsrc) that adds support for getting flag values
